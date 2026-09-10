@@ -1,84 +1,82 @@
-const { Plugin, MarkdownView } = require('obsidian');
+const { Plugin, MarkdownView, WorkspaceLeaf } = require('obsidian');
 
 module.exports = class CursorScrollSyncPlugin extends Plugin {
     onload() {
-        console.log('[CursorScrollSync] 플러그인이 로드되었습니다.');
-
-        // 1. 원본 setMode 함수 보관 (플러그인 끌 때 복구용)
+        // =========================================================================
+        // [기능 1] 읽기 모드 ↔ 편집 모드 전환 보정 (사용자 실제 입력 감지 방식)
+        // =========================================================================
         const origSetMode = MarkdownView.prototype.setMode;
         this.origSetMode = origSetMode;
 
-        // 2. setMode 후킹
         MarkdownView.prototype.setMode = async function(mode, ...args) {
-            const fromMode = this.getMode(); // 전환 전 현재 모드 ('source' 또는 'preview')
+            const fromMode = this.getMode();
 
             try {
-                // ==========================================
-                // [방향 1] 편집 모드('source') ➔ 읽기 모드('preview')
-                // ==========================================
+                // 1. 편집 모드 ➔ 읽기 모드
                 if (fromMode === 'source') {
                     const scroller = this.containerEl?.querySelector('.cm-scroller');
                     if (scroller) {
                         const top = scroller.scrollTop;
-                        // 현재 편집 위치 기억
                         this._lastEditScrollTop = top;
 
-                        // 미세 스크롤로 옵시디언/CodeMirror 내부 스크롤 리스너 강제 동기화
                         scroller.scrollTop = top > 0 ? top - 1 : top + 1;
                         scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
                         scroller.scrollTop = top;
                         scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
                     }
 
+                    this._userInteractedInPreview = false;
                     const res = await origSetMode.call(this, mode, ...args);
 
-                    // 읽기 모드 진입 직후의 스크롤 위치 기록 (읽기 모드에서 스크롤 굴렸는지 감지용)
                     const previewScroller = this.containerEl?.querySelector('.markdown-preview-view');
-                    if (previewScroller) {
-                        this._previewScrollOnEnter = previewScroller.scrollTop;
+                    if (previewScroller && !previewScroller._hasScrollSyncListener) {
+                        previewScroller._hasScrollSyncListener = true;
+
+                        const markUserScrolled = () => {
+                            this._userInteractedInPreview = true;
+                        };
+
+                        previewScroller.addEventListener('wheel', markUserScrolled, { passive: true });
+                        previewScroller.addEventListener('pointerdown', markUserScrolled, { passive: true });
+                        previewScroller.addEventListener('keydown', (e) => {
+                            if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Space', 'Home', 'End'].includes(e.key)) {
+                                markUserScrolled();
+                            }
+                        }, { passive: true });
                     }
                     return res;
                 }
 
-                // ==========================================
-                // [방향 2] 읽기 모드('preview') ➔ 편집 모드('source')
-                // ==========================================
+                // 2. 읽기 모드 ➔ 편집 모드
                 else if (fromMode === 'preview') {
-                    const previewScroller = this.containerEl?.querySelector('.markdown-preview-view');
-                    const currentPreviewTop = previewScroller ? previewScroller.scrollTop : 0;
-
-                    // 사용자가 읽기 모드에서 실제로 스크롤을 굴렸는지 판별 (15px 이상 이동 시)
-                    const userScrolledInPreview = (this._previewScrollOnEnter !== undefined) && 
-                        (Math.abs(currentPreviewTop - this._previewScrollOnEnter) > 15);
-
+                    const userActuallyScrolled = this._userInteractedInPreview === true;
                     let targetScroll = null;
 
-                    if (userScrolledInPreview && previewScroller) {
-                        // 읽기 모드에서 스크롤을 이동했다면 최신 라인 캐시 갱신
-                        previewScroller.scrollTop = currentPreviewTop > 0 ? currentPreviewTop - 1 : currentPreviewTop + 1;
-                        previewScroller.dispatchEvent(new Event('scroll', { bubbles: true }));
-                        previewScroller.scrollTop = currentPreviewTop;
-                        previewScroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    if (userActuallyScrolled) {
+                        const previewScroller = this.containerEl?.querySelector('.markdown-preview-view');
+                        if (previewScroller) {
+                            const top = previewScroller.scrollTop;
+                            previewScroller.scrollTop = top > 0 ? top - 1 : top + 1;
+                            previewScroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+                            previewScroller.scrollTop = top;
+                            previewScroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+                        }
                         targetScroll = this.currentMode?.getScroll ? this.currentMode.getScroll() : null;
                     }
 
                     const res = await origSetMode.call(this, mode, ...args);
 
-                    // CodeMirror 가상 DOM 렌더링 타이밍으로 인한 상단 튕김 방지
                     const restorePosition = () => {
                         const scroller = this.containerEl?.querySelector('.cm-scroller');
                         if (!scroller) return;
 
-                        if (!userScrolledInPreview && this._lastEditScrollTop !== undefined) {
-                            // 스크롤을 안 건드렸다면 이전 편집 위치로 1px 오차 없이 복원
+                        if (!userActuallyScrolled && this._lastEditScrollTop !== undefined) {
                             scroller.scrollTop = this._lastEditScrollTop;
                         } else if (targetScroll !== null && this.currentMode?.applyScroll) {
-                            // 읽기 모드에서 스크롤을 내렸다면 그 위치에 안착
                             this.currentMode.applyScroll(targetScroll);
                         }
                     };
 
-                    // 가상 DOM 높이 계산 딜레이(0ms, 다음 프레임, 40ms, 120ms)를 고려해 위치 고정
                     restorePosition();
                     requestAnimationFrame(restorePosition);
                     setTimeout(restorePosition, 40);
@@ -87,18 +85,64 @@ module.exports = class CursorScrollSyncPlugin extends Plugin {
                     return res;
                 }
             } catch (err) {
-                console.error('[CursorScrollSync Error]:', err);
+                console.error('[ModeSwitchScrollFix Error (setMode)]:', err);
             }
 
             return origSetMode.call(this, mode, ...args);
         };
+
+        // =========================================================================
+        // [기능 2] 라이브 편집 모드 ↔ 편집 전용(소스) 모드 누적 밀림 방지
+        // =========================================================================
+        const LeafProto = WorkspaceLeaf?.prototype || Object.getPrototypeOf(this.app.workspace.getLeaf());
+        const origSetViewState = LeafProto.setViewState;
+        this.origSetViewState = origSetViewState;
+
+        LeafProto.setViewState = async function(viewState, eState) {
+            try {
+                const view = this.view;
+                const isMarkdown = view?.getViewType?.() === 'markdown';
+
+                const isLiveVsSourceToggle = isMarkdown && 
+                    (view.getMode() === 'source') && 
+                    (viewState?.state?.mode === 'source') && 
+                    (view.getState()?.source !== viewState?.state?.source);
+
+                if (isLiveVsSourceToggle) {
+                    const scroller = view.containerEl?.querySelector('.cm-scroller');
+                    const targetTop = scroller ? scroller.scrollTop : 0;
+
+                    const res = await origSetViewState.call(this, viewState, eState);
+
+                    const lockScroll = () => {
+                        const s = view.containerEl?.querySelector('.cm-scroller');
+                        if (s && targetTop !== undefined) {
+                            s.scrollTop = targetTop;
+                        }
+                    };
+
+                    lockScroll();
+                    requestAnimationFrame(lockScroll);
+                    setTimeout(lockScroll, 40);
+                    setTimeout(lockScroll, 120);
+
+                    return res;
+                }
+            } catch (err) {
+                console.error('[ModeSwitchScrollFix Error (setViewState)]:', err);
+            }
+
+            return origSetViewState.call(this, viewState, eState);
+        };
     }
 
     onunload() {
-        // 플러그인 비활성화 시 옵시디언 순정 함수로 원상복구
         if (this.origSetMode) {
             MarkdownView.prototype.setMode = this.origSetMode;
         }
-        console.log('[CursorScrollSync] 플러그인이 언로드되었습니다 (원본 복원 완료).');
+        if (this.origSetViewState) {
+            const LeafProto = WorkspaceLeaf?.prototype || Object.getPrototypeOf(this.app.workspace.getLeaf());
+            LeafProto.setViewState = this.origSetViewState;
+        }
     }
 };
