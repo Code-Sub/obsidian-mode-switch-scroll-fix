@@ -1,0 +1,9 @@
+{
+  "id": "mode-switch-scroll-fix",
+  "name": "Mode Switch Scroll Fix",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Seamlessly preserves exact scroll position when switching between Edit and Reading modes.",
+  "author": "Code-Sub",
+  "isDesktopOnly": false
+}
