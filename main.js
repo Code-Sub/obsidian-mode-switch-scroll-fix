@@ -2,6 +2,24 @@ const { Plugin, MarkdownView, WorkspaceLeaf } = require('obsidian');
 
 module.exports = class CursorScrollSyncPlugin extends Plugin {
 	onload() {
+		// 테이블 존재 여부 확인 헬퍼 함수
+		const checkIfHasTable = (view) => {
+			if (!view || !view.containerEl) return false;
+
+			// 1. DOM 검사 (읽기 모드 table 태그 또는 라이브 프리뷰 table 위젯)
+			const hasDomTable = !!view.containerEl.querySelector('table, .cm-table-widget');
+			if (hasDomTable) return true;
+
+			// 2. 소스 모드 보조 검사: DOM에 아직 table 태그가 없는 순수 마크다운 상태일 때
+			if (typeof view.getViewData === 'function') {
+				const data = view.getViewData();
+				// 마크다운 테이블 문법(| 헤더 | 또는 |---|) 존재 여부 체크
+				return /^\s*\|.+\|/m.test(data);
+			}
+
+			return false;
+		};
+
 		// =========================================================================
 		// 1. 읽기 모드 ↔ 편집 모드 스크롤 정밀 동기화
 		// =========================================================================
@@ -9,6 +27,11 @@ module.exports = class CursorScrollSyncPlugin extends Plugin {
 		this.origSetMode = origSetMode;
 
 		MarkdownView.prototype.setMode = async function (mode, ...args) {
+			// [가드] 테이블이 없는 일반 문서라면 기본 옵시디언 동작 수행 후 즉시 리턴
+			if (!checkIfHasTable(this)) {
+				return origSetMode.call(this, mode, ...args);
+			}
+
 			const fromMode = this.getMode();
 
 			try {
@@ -154,6 +177,11 @@ module.exports = class CursorScrollSyncPlugin extends Plugin {
 					view.getState()?.source !== viewState?.state?.source;
 
 				if (isLiveVsSourceToggle) {
+					// [가드] 테이블이 없는 문서면 기본 동작 수행
+					if (!checkIfHasTable(view)) {
+						return origSetViewState.call(this, viewState, eState);
+					}
+
 					const scroller = view.containerEl?.querySelector('.cm-scroller');
 					const targetTop = scroller ? scroller.scrollTop : 0;
 
